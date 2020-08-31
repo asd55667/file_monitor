@@ -19,10 +19,12 @@ encrypt = hashlib.md5
 
 # from watchdog.events import LoggingEventHandler
 
-APPID = 'wxa32c3cbdd6ad143d'
-SERECT = 'e21f01652102022fdeff510e69a429a0'
+APPID = ''
+SERECT = ''
+
 TOKEN = ''
 UPDATE_TOKEN_TIME = 0
+ROOT_DIR = ''
 
 def log(func):
     @functools.wraps(func)
@@ -101,12 +103,15 @@ def content_sizeCheck(content: bytes) -> bytes:
 
 # sensetive info recognition of upload content
 def content_check(upload_file: str, token: str) -> (str, dict):
-    with open(upload_file, 'rb') as up_f:
-        content = up_f.read()
+    try:
+        with open(upload_file, 'rb') as up_f:
+            content = up_f.read()
+    except:
+        content = None
 
-    digest = encrypt(content).hexdigest()
     if not content:
-        return digest, {'errcode': None, 'errmsg': None}
+        return None, {'errcode': None, 'errmsg': None}
+    digest = encrypt(content).hexdigest()
     # 255216 jpg; 7173 gif; 6677 BMP, 13780 PNG; 7790 exe, 8297 rar
     file_info = str(content[0]) + str(content[1])
     fmt = 'https://api.weixin.qq.com/wxa/{}_sec_check?access_token=' + token
@@ -129,7 +134,7 @@ def content_check(upload_file: str, token: str) -> (str, dict):
         # content: bytes of str dict
         headers = {'Content-Type': 'application/json'}
         res = requests.post(url, data=content, headers=headers)
-        
+
     print(res.json())
     return digest, res.json()
 
@@ -145,7 +150,7 @@ def dup_search(name: str, dup: str):
         return 0
 
 # handle name duplication of upload file
-def file_move(src: 'pathlib.Path', dst: "pathlib.Path"):
+def file_op(src: 'pathlib.Path', dst: "pathlib.Path", op='move'):
     if dst.exists():
         replica = [f.stem for f in dst.parent.iterdir()]
         f = partial(dup_search, src.stem)
@@ -154,21 +159,21 @@ def file_move(src: 'pathlib.Path', dst: "pathlib.Path"):
             maxn = 1
         name = src.stem + f'({maxn + 1})' + src.suffix
         dst = dst.parent / name
-    shutil.move(str(src), str(dst))
+    if op == 'move':    shutil.move(str(src), str(dst))
+    elif op == 'copy':  shutil.copy(str(src), str(dst))
 
 # handle response errcode
 def handle_recognized_img(upload_file: str, code: int):
     # filter img to dst directory
-    global TOKEN, APPID, SERECT, UPDATE_TOKEN_TIME
-    for folder in ['checked', 'risky', 'unchecked', 'error']:
-        os.makedirs(upload_file.parent.parent / folder, exist_ok=True)
+    global TOKEN, APPID, SERECT, UPDATE_TOKEN_TIME, ROOT_DIR
 
     if code == 0:
-        file_move(upload_file, upload_file.parent.parent /
-                  'checked' / upload_file.name)
+        pass
+        # file_op(upload_file, ROOT_DIR /
+        #           'checked' / upload_file.name, 'move')
     elif code == 87014:
-        file_move(upload_file, upload_file.parent.parent /
-                  'risky' / upload_file.name)
+        file_op(upload_file, ROOT_DIR /
+                'risky' / upload_file.name, 'move')
     elif code == 42001 or code == 41001:
         # code expire or code missing
         try:
@@ -177,43 +182,19 @@ def handle_recognized_img(upload_file: str, code: int):
             _, res = content_check(upload_file, TOKEN)
             handle_recognized_img(upload_file, res['errcode'])
         except:
-            file_move(upload_file, upload_file.parent.parent /
-                      'unchecked' / upload_file.name)
+            file_op(upload_file, ROOT_DIR /
+                    'unchecked' / upload_file.name, 'copy')
     else:
-        file_move(upload_file, upload_file.parent.parent /
-                  'error' / upload_file.name)
+        file_op(upload_file, ROOT_DIR /
+                'error' / upload_file.name, 'copy')
 
 
 class LoggingEventHandler(FileSystemEventHandler):
     """Logs all the events captured."""
 
-    @log
     def on_created(self, event):
         super(LoggingEventHandler, self).on_created(event)
-
-        global TOKEN, UPDATE_TOKEN_TIME, APPID, SERECT
-        if time.time() > UPDATE_TOKEN_TIME:
-            TOKEN, duration = get_token(APPID, SERECT)
-            UPDATE_TOKEN_TIME = time.time() + duration
         what = 'directory' if event.is_directory else 'file'
-
-        f = open("uploads.log", 'a+')
-        upload_file = pathlib.Path(event.src_path)
-
-        # img suffix detect
-        if what == 'file' and upload_file.suffix in ['.jpg', '.png', '.gif', '.ico']:
-            digest, res = content_check(upload_file, TOKEN)
-
-            # log
-            code = res['errcode']
-            filename = upload_file.name
-            upload_date = time.strftime("%Y/%D-%T")
-            line = f"{digest},{filename},{code},{res['errmsg']},{upload_date}\n"
-            f.write(line)
-
-            handle_recognized_img(upload_file, code)
-
-        f.close()
 
         logging.info("Created %s: %s", what, event.src_path)
 
@@ -222,7 +203,43 @@ class LoggingEventHandler(FileSystemEventHandler):
 
         what = 'directory' if event.is_directory else 'file'
         logging.info("Deleted %s: %s", what, event.src_path)
+        
+    @log
+    def on_modified(self, event):
+        super(LoggingEventHandler, self).on_modified(event)
 
+        global TOKEN, UPDATE_TOKEN_TIME, APPID, SERECT, ROOT_DIR
+        if time.time() > UPDATE_TOKEN_TIME:
+            TOKEN, duration = get_token(APPID, SERECT)
+            UPDATE_TOKEN_TIME = time.time() + duration
+        what = 'directory' if event.is_directory else 'file'
+
+        f = open(ROOT_DIR / "uploads.log", 'a+')
+        upload_file = pathlib.Path(event.src_path)
+
+        # img suffix detect
+        if what == 'file' and upload_file.suffix in ['.jpg', '.png', '.gif', '.ico']:
+            logging.info(f"content-check for {upload_file}")
+            digest, res = content_check(upload_file, TOKEN)
+
+            # log
+            logging.info(f"{upload_file} result with errcode {res['errcode']}")
+            code = res['errcode']
+            filename = upload_file.name
+            upload_date = time.strftime("%Y/%D-%T")
+            line = f"{digest},{filename},{code},{res['errmsg']},{upload_date}\n"
+            f.write(line)
+
+            handle_recognized_img(upload_file, code)
+
+            if code !=  0:
+                url = f"https://fds.leduo.cn/callback_secImage.php?file={upload_file}&errcode={code}&errmsg={res['errmsg']}"
+                requests.post(url)
+                # shutil.copy('C:/Users/Administrator/wcw/file_monitor/err.png', upload_file)
+                shutil.copy('/www/wwwroot/fds.leduo.cn/Uploads/images/err.png', filename)
+
+        f.close()
+        logging.info("Modified %s: %s", what, event.src_path)
 
 def file_monitor(uploads_dir: str = ''):
     logging.basicConfig(level=logging.INFO,
@@ -232,19 +249,35 @@ def file_monitor(uploads_dir: str = ''):
 
     # check logfile
     path = pathlib.Path(os.path.abspath(path))
-    if not (path / "uploads.log").exists():
-        f = open("uploads.log", 'w')
+    logging.info(f"Monitoring directory {str(path.absolute())}")
+
+    # the place (../) where wrong img to go
+    for folder in ['risky', 'unchecked', 'error']:
+        os.makedirs(path.parent / folder , exist_ok=True)
+
+    global ROOT_DIR
+    ROOT_DIR = path.parent
+
+    if not (ROOT_DIR / "uploads.log").exists():
+        f = open(ROOT_DIR / "uploads.log", 'w')
         line = "img_id,img_name,code,response_msg,upload_date\n"
         f.write(line)
-        f.close()
+        f.close()    
 
     event_handler = LoggingEventHandler()
 
     observer = Observer()
     observer.schedule(event_handler, str(path), recursive=True)
     observer.start()
+    logging.info('Observer start, waiting for image uploads')
+
+    iStart = time.time()
     try:
         while True:
+            if time.time() - iStart >= 300:
+                with open(path /'lastCheckPoint.time', 'w') as f:
+                    f.write(time.strftime("%Y/%D-%T"))
+                iStart = time.time()            
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
